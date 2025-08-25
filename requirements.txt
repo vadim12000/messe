@@ -1,4 +1,5 @@
 fastapi
-uvicorn
-sqlalchemy
-python-multipart 
+uvicorn[standard]
+SQLAlchemy
+passlib[bcrypt]
+python-multipart
