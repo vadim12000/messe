@@ -99,8 +99,13 @@ async def login_user(username: str = Form(...), password: str = Form(...), db: S
     return {"id": user.id, "username": user.username}
 
 @app.get("/users/search/")
-async def search_users(query: str, db: Session = Depends(get_db)):
-    users = db.query(User).filter(User.username.contains(query)).limit(10).all()
+async def search_users(query: str = "", db: Session = Depends(get_db)): # ИЗМЕНЕНИЕ: query теперь необязательный
+    if query:
+        users = db.query(User).filter(User.username.contains(query)).limit(20).all()
+    else:
+        # Если запрос пустой, возвращаем всех пользователей
+        users = db.query(User).limit(50).all() # Ограничим, чтобы не перегружать
+        
     return [{"id": user.id, "username": user.username} for user in users]
 
 @app.post("/chats/create/")
@@ -159,3 +164,4 @@ async def websocket_endpoint(websocket: WebSocket, chat_id: int, user_id: int):
         manager.disconnect(websocket, chat_id)
     finally:
         db.close()
+
