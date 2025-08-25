@@ -1,15 +1,18 @@
 import asyncio
 import json
 from datetime import datetime
+# ИСПРАВЛЕНИЕ ТУТ:
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Depends, Form
 from sqlalchemy import create_engine, Column, Integer, String, ForeignKey, Table, DateTime
-from sqlalchemy.orm import sessionmaker, relationship, Session
+from sqlalchemy.orm import declarative_base, sessionmaker, relationship, Session # <-- ДОБАВЛЕНО declarative_base
 from sqlalchemy.sql import func
 from typing import Dict, List
 
 # --- Настройка базы данных ---
 DATABASE_URL = "sqlite:///./messenger.db"
-Base = declarative_base()
+Base = declarative_base() # Теперь эта строка будет работать
+
+# ... остальной код сервера остается без изменений ...
 
 # Таблица связи "пользователь-чат" (многие ко многим)
 chat_user_association = Table(
