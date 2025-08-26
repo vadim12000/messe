@@ -6,7 +6,6 @@ from sqlalchemy.orm import declarative_base, sessionmaker, relationship, Session
 from sqlalchemy.sql import func
 from typing import List, Dict
 
-# Используем passlib для безопасного хеширования паролей
 from passlib.context import CryptContext
 
 # --- Настройка ---
@@ -15,6 +14,8 @@ Base = declarative_base()
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 # --- Модели SQLAlchemy ---
+
+# Таблица связи "многие-ко-многим"
 chat_user_association = Table(
     'chat_user_association', Base.metadata,
     Column('user_id', Integer, ForeignKey('users.id', ondelete="CASCADE"), primary_key=True),
@@ -28,14 +29,29 @@ class User(Base):
     hashed_password = Column(String, nullable=False)
     avatar_url = Column(String, nullable=True)
     last_seen = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
-    chats = relationship("Chat", secondary=chat_user_association, back_populates="users")
+    
+    # --- ИСПРАВЛЕНИЕ ЗДЕСЬ ---
+    # Поле `chats` в `User` ссылается на поле `users` в `Chat`
+    chats = relationship(
+        "Chat", 
+        secondary=chat_user_association, 
+        back_populates="users"
+    )
 
 class Chat(Base):
     __tablename__ = "chats"
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String) 
-    users = relationship("User", secondary=chat_user_association, back_populates="users")
     messages = relationship("Message", back_populates="chat", cascade="all, delete-orphan", order_by="Message.timestamp.desc()")
+    
+    # --- ИСПРАВЛЕНИЕ ЗДЕСЬ ---
+    # Поле `users` в `Chat` ссылается на поле `chats` в `User`
+    users = relationship(
+        "User", 
+        secondary=chat_user_association, 
+        back_populates="chats"
+    )
+
 
 class Message(Base):
     __tablename__ = "messages"
@@ -63,7 +79,8 @@ def get_db():
 
 app = FastAPI()
 
-# --- Менеджер WebSocket-соединений ---
+# --- Менеджер WebSocket ---
+# ... (Код ConnectionManager без изменений) ...
 class ConnectionManager:
     def __init__(self):
         self.rooms: Dict[int, List[WebSocket]] = {}
@@ -78,10 +95,10 @@ class ConnectionManager:
         if chat_id in self.rooms:
             for connection in list(self.rooms[chat_id]):
                 await connection.send_text(message)
-
 manager = ConnectionManager()
 
 # --- API эндпоинты ---
+# ... (Код остальных эндпоинтов без изменений, он корректен) ...
 @app.post("/register/")
 def register_user(username: str = Form(...), password: str = Form(...), db: Session = Depends(get_db)):
     if db.query(User).filter(User.username == username).first():
