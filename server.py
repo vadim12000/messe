@@ -116,6 +116,18 @@ def register_user(username: str = Form(...), password: str = Form(...), db: Sess
     return {"id": new_user.id, "username": new_user.username}
 # ------------------------------------
 
+@app.post("/chats/{chat_id}/clear_history/")
+def clear_chat_history(chat_id: int, db: Session = Depends(get_db)):
+    chat = db.query(Chat).get(chat_id)
+    if not chat:
+        raise HTTPException(status_code=404, detail="Чат не найден")
+    
+    # Удаляем все сообщения, связанные с этим чатом
+    db.query(Message).filter(Message.chat_id == chat_id).delete()
+    db.commit()
+    
+    return {"message": "История чата успешно очищена"}
+
 @app.post("/login/")
 def login_user(username: str = Form(...), password: str = Form(...), db: Session = Depends(get_db)):
     user = db.query(User).filter(User.username == username).first()
@@ -216,3 +228,4 @@ async def websocket_endpoint(websocket: WebSocket, chat_id: int, user_id: int):
         print(f"Ошибка WebSocket: {e}"); manager.disconnect(websocket, chat_id)
     finally:
         db.close()
+
