@@ -80,15 +80,41 @@ class ConnectionManager:
 manager = ConnectionManager()
 
 # --- API эндпоинты ---
-# ... (register, login, search_users - без изменений) ...
+
+# --- ВОТ ГЛАВНОЕ ИЗМЕНЕНИЕ ---
 @app.post("/register/")
 def register_user(username: str = Form(...), password: str = Form(...), db: Session = Depends(get_db)):
+    # Проверяем, не занято ли имя
     if db.query(User).filter(User.username == username).first():
         raise HTTPException(status_code=400, detail="Имя пользователя уже занято")
+    
+    # Находим всех существующих пользователей ДО создания нового
+    existing_users = db.query(User).all()
+
+    # Создаем нового пользователя
     hashed_password = pwd_context.hash(password)
     new_user = User(username=username, hashed_password=hashed_password)
-    db.add(new_user); db.commit(); db.refresh(new_user)
+    db.add(new_user)
+    db.commit()
+    db.refresh(new_user)
+
+    # --- Новая логика: создаем чаты со всеми остальными ---
+    for old_user in existing_users:
+        # Пропускаем, если по какой-то причине это тот же пользователь
+        if old_user.id == new_user.id:
+            continue
+        
+        # Создаем чат между новым и каждым старым пользователем
+        technical_name = f"Chat between {new_user.id} and {old_user.id}"
+        chat = Chat(name=technical_name, users=[new_user, old_user])
+        db.add(chat)
+    
+    # Сохраняем все созданные чаты в базу данных
+    if existing_users:
+        db.commit()
+
     return {"id": new_user.id, "username": new_user.username}
+# ------------------------------------
 
 @app.post("/login/")
 def login_user(username: str = Form(...), password: str = Form(...), db: Session = Depends(get_db)):
@@ -107,32 +133,20 @@ def search_users(query: str = "", db: Session = Depends(get_db)):
         users = db.query(User).all()
     return [{"id": user.id, "username": user.username} for user in users]
 
-
-# --- ВОТ ГЛАВНОЕ ИСПРАВЛЕНИЕ ---
 @app.post("/chats/create/")
 def create_chat(user1_id: int = Form(...), user2_id: int = Form(...), db: Session = Depends(get_db)):
-    # --- ИЗМЕНЕНИЕ: Используем простые и надежные запросы для получения пользователей ---
     user1 = db.query(User).get(user1_id)
     user2 = db.query(User).get(user2_id)
-    
     if not user1 or not user2:
         raise HTTPException(status_code=404, detail="Пользователь не найден")
-
-    # SQLAlchemy автоматически подгрузит user1.chats, когда мы к ним обратимся ("ленивая" загрузка)
     for chat in user1.chats:
         if user2 in chat.users:
             return {"id": chat.id, "name": "Уже существует", "message": "Чат уже существует"}
-
     technical_name = f"Chat between {user1.id} and {user2.id}"
     new_chat = Chat(name=technical_name, users=[user1, user2])
-    db.add(new_chat)
-    db.commit()
-    db.refresh(new_chat)
+    db.add(new_chat); db.commit(); db.refresh(new_chat)
     return {"id": new_chat.id, "name": user2.username}
-# ------------------------------------
 
-
-# ... (get_user_chats, get_chat_messages, websocket_endpoint - без изменений) ...
 @app.get("/chats/{user_id}/")
 def get_user_chats(user_id: int, db: Session = Depends(get_db)):
     try:
