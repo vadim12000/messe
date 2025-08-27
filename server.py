@@ -6,16 +6,20 @@ from sqlalchemy.orm import declarative_base, sessionmaker, relationship, Session
 from sqlalchemy.sql import func
 from typing import List, Dict
 
+# Используем passlib для безопасного хеширования паролей
 from passlib.context import CryptContext
 
 # --- Настройка ---
 DATABASE_URL = "sqlite:///./messenger.db" 
 Base = declarative_base()
+
+# Настройка контекста для хеширования паролей (используем bcrypt)
+# Эта конфигурация совместима со старыми версиями passlib/bcrypt
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 # --- Модели SQLAlchemy ---
 
-# Таблица связи "многие-ко-многим"
+# Таблица связи для отношения "многие-ко-многим" между пользователями и чатами
 chat_user_association = Table(
     'chat_user_association', Base.metadata,
     Column('user_id', Integer, ForeignKey('users.id', ondelete="CASCADE"), primary_key=True),
@@ -30,8 +34,7 @@ class User(Base):
     avatar_url = Column(String, nullable=True)
     last_seen = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
     
-    # --- ИСПРАВЛЕНИЕ ЗДЕСЬ ---
-    # Поле `chats` в `User` ссылается на поле `users` в `Chat`
+    # Связь с чатами: поле `chats` в `User` ссылается на поле `users` в `Chat`
     chats = relationship(
         "Chat", 
         secondary=chat_user_association, 
@@ -44,8 +47,7 @@ class Chat(Base):
     name = Column(String) 
     messages = relationship("Message", back_populates="chat", cascade="all, delete-orphan", order_by="Message.timestamp.desc()")
     
-    # --- ИСПРАВЛЕНИЕ ЗДЕСЬ ---
-    # Поле `users` в `Chat` ссылается на поле `chats` в `User`
+    # Связь с пользователями: поле `users` в `Chat` ссылается на поле `chats` в `User`
     users = relationship(
         "User", 
         secondary=chat_user_association, 
@@ -68,8 +70,10 @@ class Message(Base):
 # --- Настройка Базы Данных ---
 engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+# Создает таблицы в БД, если их нет
 Base.metadata.create_all(bind=engine)
 
+# Зависимость для получения сессии БД в эндпоинтах
 def get_db():
     db = SessionLocal()
     try:
@@ -79,8 +83,7 @@ def get_db():
 
 app = FastAPI()
 
-# --- Менеджер WebSocket ---
-# ... (Код ConnectionManager без изменений) ...
+# --- Менеджер WebSocket-соединений ---
 class ConnectionManager:
     def __init__(self):
         self.rooms: Dict[int, List[WebSocket]] = {}
@@ -95,10 +98,10 @@ class ConnectionManager:
         if chat_id in self.rooms:
             for connection in list(self.rooms[chat_id]):
                 await connection.send_text(message)
+
 manager = ConnectionManager()
 
 # --- API эндпоинты ---
-# ... (Код остальных эндпоинтов без изменений, он корректен) ...
 @app.post("/register/")
 def register_user(username: str = Form(...), password: str = Form(...), db: Session = Depends(get_db)):
     if db.query(User).filter(User.username == username).first():
