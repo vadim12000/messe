@@ -1,9 +1,8 @@
-fastapi==0.104.1
-uvicorn[standard]==0.24.0.post1
-SQLAlchemy==2.0.23
-python-multipart==0.0.6
+fastapi
+uvicorn[standard]
+SQLAlchemy
+python-multipart
 
-# --- ВОТ ГЛАВНОЕ ИСПРАВЛЕНИЕ: Жестко фиксируем рабочие версии ---
-passlib==5.3.1
-bcrypt==4.0.1
-cryptography==41.0.5
+# --- ВОТ ГЛАВНОЕ ИСПРАВЛЕНИЕ: Используем старые, но совместимые версии ---
+passlib==1.7.4
+bcrypt==3.2.0
