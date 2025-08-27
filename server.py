@@ -6,20 +6,14 @@ from sqlalchemy.orm import declarative_base, sessionmaker, relationship, Session
 from sqlalchemy.sql import func
 from typing import List, Dict
 
-# Используем passlib для безопасного хеширования паролей
 from passlib.context import CryptContext
 
 # --- Настройка ---
 DATABASE_URL = "sqlite:///./messenger.db" 
 Base = declarative_base()
-
-# Настройка контекста для хеширования паролей (используем bcrypt)
-# Эта конфигурация совместима со старыми версиями passlib/bcrypt
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
-# --- Модели SQLAlchemy ---
-
-# Таблица связи для отношения "многие-ко-многим" между пользователями и чатами
+# --- Модели SQLAlchemy (без изменений) ---
 chat_user_association = Table(
     'chat_user_association', Base.metadata,
     Column('user_id', Integer, ForeignKey('users.id', ondelete="CASCADE"), primary_key=True),
@@ -33,27 +27,14 @@ class User(Base):
     hashed_password = Column(String, nullable=False)
     avatar_url = Column(String, nullable=True)
     last_seen = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
-    
-    # Связь с чатами: поле `chats` в `User` ссылается на поле `users` в `Chat`
-    chats = relationship(
-        "Chat", 
-        secondary=chat_user_association, 
-        back_populates="users"
-    )
+    chats = relationship("Chat", secondary=chat_user_association, back_populates="users")
 
 class Chat(Base):
     __tablename__ = "chats"
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String) 
+    users = relationship("User", secondary=chat_user_association, back_populates="chats")
     messages = relationship("Message", back_populates="chat", cascade="all, delete-orphan", order_by="Message.timestamp.desc()")
-    
-    # Связь с пользователями: поле `users` в `Chat` ссылается на поле `chats` в `User`
-    users = relationship(
-        "User", 
-        secondary=chat_user_association, 
-        back_populates="chats"
-    )
-
 
 class Message(Base):
     __tablename__ = "messages"
@@ -70,10 +51,8 @@ class Message(Base):
 # --- Настройка Базы Данных ---
 engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-# Создает таблицы в БД, если их нет
 Base.metadata.create_all(bind=engine)
 
-# Зависимость для получения сессии БД в эндпоинтах
 def get_db():
     db = SessionLocal()
     try:
@@ -83,7 +62,7 @@ def get_db():
 
 app = FastAPI()
 
-# --- Менеджер WebSocket-соединений ---
+# --- Менеджер WebSocket (без изменений) ---
 class ConnectionManager:
     def __init__(self):
         self.rooms: Dict[int, List[WebSocket]] = {}
@@ -98,10 +77,10 @@ class ConnectionManager:
         if chat_id in self.rooms:
             for connection in list(self.rooms[chat_id]):
                 await connection.send_text(message)
-
 manager = ConnectionManager()
 
 # --- API эндпоинты ---
+# ... (register, login, search_users - без изменений) ...
 @app.post("/register/")
 def register_user(username: str = Form(...), password: str = Form(...), db: Session = Depends(get_db)):
     if db.query(User).filter(User.username == username).first():
@@ -128,22 +107,32 @@ def search_users(query: str = "", db: Session = Depends(get_db)):
         users = db.query(User).all()
     return [{"id": user.id, "username": user.username} for user in users]
 
+
+# --- ВОТ ГЛАВНОЕ ИСПРАВЛЕНИЕ ---
 @app.post("/chats/create/")
 def create_chat(user1_id: int = Form(...), user2_id: int = Form(...), db: Session = Depends(get_db)):
-    user1 = db.query(User).options(selectinload(User.chats).subqueryload(Chat.users)).get(user1_id)
+    # --- ИЗМЕНЕНИЕ: Используем простые и надежные запросы для получения пользователей ---
+    user1 = db.query(User).get(user1_id)
     user2 = db.query(User).get(user2_id)
+    
     if not user1 or not user2:
         raise HTTPException(status_code=404, detail="Пользователь не найден")
 
+    # SQLAlchemy автоматически подгрузит user1.chats, когда мы к ним обратимся ("ленивая" загрузка)
     for chat in user1.chats:
         if user2 in chat.users:
             return {"id": chat.id, "name": "Уже существует", "message": "Чат уже существует"}
 
     technical_name = f"Chat between {user1.id} and {user2.id}"
     new_chat = Chat(name=technical_name, users=[user1, user2])
-    db.add(new_chat); db.commit(); db.refresh(new_chat)
+    db.add(new_chat)
+    db.commit()
+    db.refresh(new_chat)
     return {"id": new_chat.id, "name": user2.username}
+# ------------------------------------
 
+
+# ... (get_user_chats, get_chat_messages, websocket_endpoint - без изменений) ...
 @app.get("/chats/{user_id}/")
 def get_user_chats(user_id: int, db: Session = Depends(get_db)):
     try:
