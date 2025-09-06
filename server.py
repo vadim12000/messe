@@ -35,7 +35,6 @@ MESSAGES_DIR = os.path.join(UPLOAD_DIR, "messages")
 os.makedirs(AVATAR_DIR, exist_ok=True)
 os.makedirs(MESSAGES_DIR, exist_ok=True)
 
-
 # --- Модели SQLAlchemy ---
 chat_user_association = Table('chat_user_association', Base.metadata,
     Column('user_id', Integer, ForeignKey('users.id', ondelete="CASCADE"), primary_key=True),
@@ -50,16 +49,14 @@ class User(Base):
     avatar_url = Column(String, nullable=True)
     last_seen = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
     firebase_token = Column(String, nullable=True)
-    # --- ПРАВИЛЬНАЯ СВЯЗЬ ---
     chats = relationship("Chat", secondary=chat_user_association, back_populates="users")
 
 class Chat(Base):
     __tablename__ = "chats"
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String) 
-    messages = relationship("Message", back_populates="chat", cascade="all, delete-orphan", order_by="Message.timestamp.desc()")
-    # --- ПРАВИЛЬНАЯ СВЯЗЬ ---
     users = relationship("User", secondary=chat_user_association, back_populates="chats")
+    messages = relationship("Message", back_populates="chat", cascade="all, delete-orphan", order_by="Message.timestamp.desc()")
 
 class Message(Base):
     __tablename__ = "messages"
@@ -267,21 +264,50 @@ async def websocket_endpoint(websocket: WebSocket, chat_id: int, user_id: int):
         while True:
             data_str = await websocket.receive_text()
             data = json.loads(data_str)
+            action = data.get("action")
             payload = data.get("payload", {})
             sender = db.query(User).get(user_id)
             if not sender: continue
             
-            new_message = Message(text=payload.get("text"), sender_id=user_id, sender_username=sender.username, chat_id=chat_id)
-            db.add(new_message); db.commit(); db.refresh(new_message)
-
-            message_to_broadcast = {"action": "new_message", "message": {"id": new_message.id, "text": new_message.text, "sender_username": new_message.sender_username, "chat_id": new_message.chat_id, "timestamp": new_message.timestamp.isoformat(), "image_url": new_message.image_url, "reply_to_text": None, "reply_to_sender": None}}
-            await manager.broadcast_to_room(chat_id, json.dumps(message_to_broadcast))
+            message_to_broadcast = None
             
-            await send_push_notification(chat_id, sender, new_message.text, db)
+            if action == "send":
+                new_message = Message(text=payload.get("text"), sender_id=user_id, sender_username=sender.username, chat_id=chat_id)
+                db.add(new_message); db.commit(); db.refresh(new_message)
+                message_to_broadcast = {"action": "new_message", "message": {"id": new_message.id, "text": new_message.text, "sender_username": new_message.sender_username, "chat_id": new_message.chat_id, "timestamp": new_message.timestamp.isoformat(), "image_url": None, "reply_to_text": None, "reply_to_sender": None}} # image_url: None так как это текстовое сообщение
+            
+            elif action == "edit":
+                message_id = payload.get("message_id")
+                new_text = payload.get("text")
+                message_to_edit = db.query(Message).get(message_id)
+                if message_to_edit and message_to_edit.sender_id == user_id:
+                    message_to_edit.text = new_text
+                    db.commit(); db.refresh(message_to_edit)
+                    # Внимание: для редактирования нужно отправить весь объект с обновленным текстом
+                    message_to_broadcast = {
+                        "action": "edit_message",
+                        "message": {
+                            "id": message_to_edit.id, 
+                            "text": message_to_edit.text, 
+                            "sender_username": message_to_edit.sender_username, 
+                            "chat_id": message_to_edit.chat_id, 
+                            "timestamp": message_to_edit.timestamp.isoformat(),
+                            "image_url": message_to_edit.image_url,
+                            "reply_to_text": None, "reply_to_sender": None,
+                        }
+                    }
+
+            
+            if message_to_broadcast:
+                await manager.broadcast_to_room(chat_id, json.dumps(message_to_broadcast))
+                
+                # Push уведомление отправляем только на новые (action == "send")
+                if action == "send":
+                    await send_push_notification(chat_id, sender, new_message.text, db)
+
     except WebSocketDisconnect:
         manager.disconnect(websocket, chat_id)
     except Exception as e:
         print(f"Ошибка WebSocket: {e}"); manager.disconnect(websocket, chat_id)
     finally:
         db.close()
-
