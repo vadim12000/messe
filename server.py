@@ -22,11 +22,11 @@ pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 # --- Настройка Firebase Admin SDK ---
 try:
     cred = credentials.Certificate("firebase-credentials.json")
-    firebase_admin.initialize_app(cred)
+    if not firebase_admin._apps:
+        firebase_admin.initialize_app(cred)
     print(">>> Firebase Admin SDK инициализирован успешно.")
 except Exception as e:
     print(f"!!! ОШИБКА ИНИЦИАЛИЗАЦИИ FIREBASE: {e}")
-    print("!!! Убедитесь, что файл 'firebase-credentials.json' находится в корне проекта.")
 
 # --- Настройка папок для загрузки файлов ---
 UPLOAD_DIR = "uploads"
@@ -34,6 +34,7 @@ AVATAR_DIR = os.path.join(UPLOAD_DIR, "avatars")
 MESSAGES_DIR = os.path.join(UPLOAD_DIR, "messages")
 os.makedirs(AVATAR_DIR, exist_ok=True)
 os.makedirs(MESSAGES_DIR, exist_ok=True)
+
 
 # --- Модели SQLAlchemy ---
 chat_user_association = Table('chat_user_association', Base.metadata,
@@ -49,14 +50,16 @@ class User(Base):
     avatar_url = Column(String, nullable=True)
     last_seen = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
     firebase_token = Column(String, nullable=True)
+    # --- ПРАВИЛЬНАЯ СВЯЗЬ ---
     chats = relationship("Chat", secondary=chat_user_association, back_populates="users")
 
 class Chat(Base):
     __tablename__ = "chats"
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String) 
-    users = relationship("User", secondary=chat_user_association, back_populates="users")
     messages = relationship("Message", back_populates="chat", cascade="all, delete-orphan", order_by="Message.timestamp.desc()")
+    # --- ПРАВИЛЬНАЯ СВЯЗЬ ---
+    users = relationship("User", secondary=chat_user_association, back_populates="chats")
 
 class Message(Base):
     __tablename__ = "messages"
@@ -281,3 +284,4 @@ async def websocket_endpoint(websocket: WebSocket, chat_id: int, user_id: int):
         print(f"Ошибка WebSocket: {e}"); manager.disconnect(websocket, chat_id)
     finally:
         db.close()
+
