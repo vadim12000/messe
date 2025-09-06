@@ -55,7 +55,7 @@ class Chat(Base):
     __tablename__ = "chats"
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String) 
-    users = relationship("User", secondary=chat_user_association, back_populates="chats")
+    users = relationship("User", secondary=chat_user_association, back_populates="users")
     messages = relationship("Message", back_populates="chat", cascade="all, delete-orphan", order_by="Message.timestamp.desc()")
 
 class Message(Base):
@@ -84,7 +84,6 @@ def get_db():
 app = FastAPI()
 app.mount("/uploads", StaticFiles(directory=UPLOAD_DIR), name="uploads")
 
-# --- Менеджер WebSocket ---
 class ConnectionManager:
     def __init__(self):
         self.rooms: Dict[int, List[WebSocket]] = {}
@@ -227,9 +226,7 @@ def get_user_chats(user_id: int, db: Session = Depends(get_db)):
 @app.get("/chats/{chat_id}/messages/")
 def get_chat_messages(chat_id: int, db: Session = Depends(get_db)):
     messages = db.query(Message).filter(Message.chat_id == chat_id).order_by(Message.timestamp).limit(100).all()
-    return [{"id": msg.id, "text": msg.text, "sender_username": msg.sender_username,
-             "chat_id": msg.chat_id, "timestamp": msg.timestamp.isoformat(),
-             "image_url": msg.image_url, "reply_to_text": None, "reply_to_sender": None} for msg in messages]
+    return [{"id": msg.id, "text": msg.text, "sender_username": msg.sender_username, "chat_id": msg.chat_id, "timestamp": msg.timestamp.isoformat(), "image_url": msg.image_url, "reply_to_text": None, "reply_to_sender": None} for msg in messages]
              
 @app.post("/chats/{chat_id}/clear_history/")
 def clear_chat_history(chat_id: int, db: Session = Depends(get_db)):
@@ -249,17 +246,14 @@ async def send_image_message(chat_id: int, user_id: int = Form(...), sender_user
         shutil.copyfileobj(file.file, buffer)
     
     image_url = f"/uploads/messages/{filename}"
-
     new_message = Message(text="[Фотография]", image_url=image_url, sender_id=user_id, sender_username=sender_username, chat_id=chat_id)
     db.add(new_message); db.commit(); db.refresh(new_message)
     
     message_to_broadcast = {"action": "new_message", "message": {"id": new_message.id, "text": new_message.text, "sender_username": new_message.sender_username, "chat_id": new_message.chat_id, "timestamp": new_message.timestamp.isoformat(), "image_url": new_message.image_url, "reply_to_text": None, "reply_to_sender": None}}
     await manager.broadcast_to_room(chat_id, json.dumps(message_to_broadcast))
-
     sender = db.query(User).get(user_id)
     if sender:
         await send_push_notification(chat_id, sender, new_message.text, db)
-    
     return message_to_broadcast
 
 @app.websocket("/ws/{chat_id}/{user_id}")
