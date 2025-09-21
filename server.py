@@ -13,6 +13,95 @@ from typing import List, Dict
 from passlib.context import CryptContext
 import firebase_admin
 from firebase_admin import credentials, messaging
+from typing import Dict
+
+# --- ИСПРАВЛЕНИЕ: Два разных менеджера соединений ---
+
+# 1. Менеджер для КОМНАТ ЧАТОВ (групповая рассылка)
+class ChatConnectionManager:
+    def __init__(self):
+        self.rooms: Dict[int, List[WebSocket]] = {}
+
+    async def connect(self, websocket: WebSocket, chat_id: int):
+        await websocket.accept()
+        if chat_id not in self.rooms:
+            self.rooms[chat_id] = []
+        self.rooms[chat_id].append(websocket)
+        print(f"User connected to chat room {chat_id}")
+
+    def disconnect(self, websocket: WebSocket, chat_id: int):
+        if chat_id in self.rooms and websocket in self.rooms[chat_id]:
+            self.rooms[chat_id].remove(websocket)
+            print(f"User disconnected from chat room {chat_id}")
+
+    async def broadcast_to_room(self, chat_id: int, message: str):
+        if chat_id in self.rooms:
+            # Создаем копию списка, чтобы избежать проблем при одновременном отключении
+            for connection in list(self.rooms[chat_id]):
+                try:
+                    await connection.send_text(message)
+                except Exception:
+                    # Если отправка не удалась, клиент скорее всего отключился
+                    self.disconnect(connection, chat_id)
+
+
+# 2. Менеджер для ПЕРСОНАЛЬНЫХ соединений ЗВОНКОВ (адресная пересылка)
+class CallConnectionManager:
+    def __init__(self):
+        self.active_connections: Dict[int, WebSocket] = {}
+
+    async def connect(self, websocket: WebSocket, user_id: int):
+        await websocket.accept()
+        self.active_connections[user_id] = websocket
+        print(f"User {user_id} connected for signaling.")
+
+    def disconnect(self, user_id: int):
+        if user_id in self.active_connections:
+            del self.active_connections[user_id]
+            print(f"User {user_id} disconnected from signaling.")
+
+    async def send_personal_message(self, message: str, user_id: int):
+        if user_id in self.active_connections:
+            websocket = self.active_connections[user_id]
+            try:
+                await websocket.send_text(message)
+                print(f"Sent signaling message to {user_id}")
+            except Exception:
+                print(f"Failed to send signaling message to user {user_id}, disconnecting.")
+                self.disconnect(user_id)
+        else:
+            print(f"User {user_id} not connected for signaling, message not sent.")
+
+# Создаем отдельные экземпляры для использования в эндпоинтах
+chat_manager = ChatConnectionManager()
+call_manager = CallConnectionManager()
+# ----------------------------------------------------
+
+# --- КОД ИЗ signaling.py ТЕПЕРЬ НАХОДИТСЯ ЗДЕСЬ ---
+class ConnectionManager:
+    def __init__(self):
+        # Словарь для хранения активных подключений: {user_id: WebSocket}
+        self.active_connections: Dict[int, WebSocket] = {}
+
+    async def connect(self, websocket: WebSocket, user_id: int):
+        await websocket.accept()
+        self.active_connections[user_id] = websocket
+        print(f"User {user_id} connected for signaling.")
+
+    def disconnect(self, user_id: int):
+        if user_id in self.active_connections:
+            del self.active_connections[user_id]
+            print(f"User {user_id} disconnected from signaling.")
+
+    async def send_personal_message(self, message: str, user_id: int):
+        if user_id in self.active_connections:
+            websocket = self.active_connections[user_id]
+            await websocket.send_text(message)
+            print(f"Sent signaling message to {user_id}")
+        else:
+            print(f"User {user_id} not connected for signaling, message not sent.")
+
+manager = ConnectionManager()
 
 # --- Настройка ---
 DATABASE_URL = "sqlite:///./messenger.db" 
@@ -237,11 +326,42 @@ def clear_chat_history(chat_id: int, db: Session = Depends(get_db)):
     db.commit()
     return {"message": "История чата успешно очищена"}
 
+@app.websocket("/ws/call/{user_id}")
+async def websocket_call_endpoint(websocket: WebSocket, user_id: int):
+    """
+    Этот эндпоинт обрабатывает WebSocket соединения для сигнализации WebRTC.
+    """
+    await manager.connect(websocket, user_id)
+    try:
+        while True:
+            # Ждем сообщение от клиента (звонящего)
+            data_str = await websocket.receive_text()
+            data = json.loads(data_str)
+            
+            # В сообщении от клиента ДОЛЖЕН быть ключ 'recipient_id'
+            recipient_id = data.get('recipient_id')
+            
+            if recipient_id:
+                print(f"Relaying signaling message from {user_id} to {recipient_id}")
+                # Просто пересылаем сообщение (со всеми данными) нужному получателю
+                await manager.send_personal_message(data_str, recipient_id)
+            else:
+                print(f"Warning: message from user {user_id} does not contain 'recipient_id'")
+
+    except WebSocketDisconnect:
+        manager.disconnect(user_id)
+        print(f"Signaling connection closed for user {user_id}")
+    except Exception as e:
+        print(f"An error occurred in call websocket for user {user_id}: {e}")
+        manager.disconnect(user_id)
+
 @app.post("/chats/{chat_id}/send_image/")
 async def send_image_message(chat_id: int, user_id: int = Form(...), sender_username: str = Form(...), file: UploadFile = File(...), db: Session = Depends(get_db)):
+    # Логика сохранения файла
     file_extension = os.path.splitext(file.filename)[1]
     filename = f"{user_id}_{chat_id}_{int(datetime.now().timestamp())}{file_extension}"
     file_path = os.path.join(MESSAGES_DIR, filename)
+    
     with open(file_path, "wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
     
@@ -249,16 +369,30 @@ async def send_image_message(chat_id: int, user_id: int = Form(...), sender_user
     new_message = Message(text="[Фотография]", image_url=image_url, sender_id=user_id, sender_username=sender_username, chat_id=chat_id)
     db.add(new_message); db.commit(); db.refresh(new_message)
     
-    message_to_broadcast = {"action": "new_message", "message": {"id": new_message.id, "text": new_message.text, "sender_username": new_message.sender_username, "chat_id": new_message.chat_id, "timestamp": new_message.timestamp.isoformat(), "image_url": new_message.image_url, "reply_to_text": None, "reply_to_sender": None}}
-    await manager.broadcast_to_room(chat_id, json.dumps(message_to_broadcast))
+    message_to_broadcast = {
+        "action": "new_message", 
+        "message": {
+            "id": new_message.id, "text": new_message.text, 
+            "sender_username": new_message.sender_username, 
+            "chat_id": new_message.chat_id, "timestamp": new_message.timestamp.isoformat(), 
+            "image_url": new_message.image_url, 
+            "reply_to_text": None, "reply_to_sender": None,
+            "is_edited": False # Добавим поле is_edited для консистентности
+        }
+    }
+    # ИСПОЛЬЗУЕМ ПРАВИЛЬНЫЙ МЕНЕДЖЕР
+    await chat_manager.broadcast_to_room(chat_id, json.dumps(message_to_broadcast))
+    
     sender = db.query(User).get(user_id)
     if sender:
         await send_push_notification(chat_id, sender, new_message.text, db)
     return message_to_broadcast
 
+# --- WebSocket для ЧАТОВ (исправлен для использования chat_manager) ---
 @app.websocket("/ws/{chat_id}/{user_id}")
 async def websocket_endpoint(websocket: WebSocket, chat_id: int, user_id: int):
-    await manager.connect(websocket, chat_id)
+    # ИСПОЛЬЗУЕМ ПРАВИЛЬНЫЙ МЕНЕДЖЕР
+    await chat_manager.connect(websocket, chat_id)
     db = SessionLocal()
     try:
         while True:
@@ -272,42 +406,67 @@ async def websocket_endpoint(websocket: WebSocket, chat_id: int, user_id: int):
             message_to_broadcast = None
             
             if action == "send":
-                new_message = Message(text=payload.get("text"), sender_id=user_id, sender_username=sender.username, chat_id=chat_id)
+                reply_to_id = payload.get("reply_to_id")
+                new_message = Message(
+                    text=payload.get("text"), 
+                    sender_id=user_id, 
+                    sender_username=sender.username, 
+                    chat_id=chat_id,
+                    reply_to_id=reply_to_id
+                )
                 db.add(new_message); db.commit(); db.refresh(new_message)
-                message_to_broadcast = {"action": "new_message", "message": {"id": new_message.id, "text": new_message.text, "sender_username": new_message.sender_username, "chat_id": new_message.chat_id, "timestamp": new_message.timestamp.isoformat(), "image_url": None, "reply_to_text": None, "reply_to_sender": None}} # image_url: None так как это текстовое сообщение
-            
+
+                reply_to_message = db.query(Message).get(reply_to_id) if reply_to_id else None
+
+                message_data = {
+                    "id": new_message.id, "text": new_message.text, 
+                    "sender_username": new_message.sender_username, 
+                    "chat_id": new_message.chat_id, "timestamp": new_message.timestamp.isoformat(), 
+                    "image_url": new_message.image_url,
+                    "is_edited": False,
+                    "reply_to_text": reply_to_message.text if reply_to_message else None,
+                    "reply_to_sender": reply_to_message.sender_username if reply_to_message else None
+                }
+                message_to_broadcast = {"action": "new_message", "message": message_data}
+
             elif action == "edit":
                 message_id = payload.get("message_id")
                 new_text = payload.get("text")
                 message_to_edit = db.query(Message).get(message_id)
                 if message_to_edit and message_to_edit.sender_id == user_id:
                     message_to_edit.text = new_text
+                    # Добавим флаг is_edited
+                    # message_to_edit.is_edited = True # Если у вас есть такое поле в модели
                     db.commit(); db.refresh(message_to_edit)
-                    # Внимание: для редактирования нужно отправить весь объект с обновленным текстом
-                    message_to_broadcast = {
-                        "action": "edit_message",
-                        "message": {
-                            "id": message_to_edit.id, 
-                            "text": message_to_edit.text, 
-                            "sender_username": message_to_edit.sender_username, 
-                            "chat_id": message_to_edit.chat_id, 
-                            "timestamp": message_to_edit.timestamp.isoformat(),
-                            "image_url": message_to_edit.image_url,
-                            "reply_to_text": None, "reply_to_sender": None,
-                        }
+
+                    reply_to_message = db.query(Message).get(message_to_edit.reply_to_id) if message_to_edit.reply_to_id else None
+
+                    message_data = {
+                        "id": message_to_edit.id, "text": message_to_edit.text, 
+                        "sender_username": message_to_edit.sender_username, 
+                        "chat_id": message_to_edit.chat_id, "timestamp": message_to_edit.timestamp.isoformat(),
+                        "image_url": message_to_edit.image_url,
+                        "is_edited": True, # Отправляем флаг клиенту
+                        "reply_to_text": reply_to_message.text if reply_to_message else None,
+                        "reply_to_sender": reply_to_message.sender_username if reply_to_message else None,
                     }
+                    message_to_broadcast = {"action": "edit_message", "message": message_data}
 
             
             if message_to_broadcast:
-                await manager.broadcast_to_room(chat_id, json.dumps(message_to_broadcast))
+                # ИСПОЛЬЗУЕМ ПРАВИЛЬНЫЙ МЕНЕДЖЕР
+                await chat_manager.broadcast_to_room(chat_id, json.dumps(message_to_broadcast))
                 
-                # Push уведомление отправляем только на новые (action == "send")
                 if action == "send":
                     await send_push_notification(chat_id, sender, new_message.text, db)
 
     except WebSocketDisconnect:
-        manager.disconnect(websocket, chat_id)
+        # ИСПОЛЬЗУЕМ ПРАВИЛЬНЫЙ МЕНЕДЖЕР
+        chat_manager.disconnect(websocket, chat_id)
     except Exception as e:
-        print(f"Ошибка WebSocket: {e}"); manager.disconnect(websocket, chat_id)
+        print(f"Ошибка WebSocket чата: {e}"); 
+        # ИСПОЛЬЗУЕМ ПРАВИЛЬНЫЙ МЕНЕДЖЕР
+        chat_manager.disconnect(websocket, chat_id)
     finally:
         db.close()
+
